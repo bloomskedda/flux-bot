@@ -514,4 +514,12 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-client.login(process.env.DISCORD_TOKEN?.trim());
+const cleanedDiscordToken = process.env.DISCORD_TOKEN
+  ?.replace("DISCORD_TOKEN=", "")
+  .replace(/^["']|["']$/g, "")
+  .trim();
+
+console.log("Discord token loaded:", cleanedDiscordToken ? "YES" : "NO");
+console.log("Discord token length:", cleanedDiscordToken?.length || 0);
+
+client.login(cleanedDiscordToken);
