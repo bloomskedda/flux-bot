@@ -21,7 +21,10 @@ const client = new Client({
 });
 
 function loadJson(file) {
-  if (!fs.existsSync(file)) return [];
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, "[]");
+    return [];
+  }
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
@@ -145,6 +148,7 @@ async function updateStats() {
 
   const channels = loadChannels();
   const statsHistory = loadStats();
+  const now = Date.now();
 
   for (const channel of channels) {
     try {
@@ -155,7 +159,7 @@ async function updateStats() {
         channelId: channel.channelId,
         views: stats.views,
         subscribers: stats.subscribers,
-        timestamp: Date.now(),
+        timestamp: now,
       });
 
       console.log(`Updated ${channel.name}`);
@@ -239,16 +243,25 @@ function getLeaderboard(periodMs) {
       .filter((s) => s.channelId === channel.channelId)
       .sort((a, b) => a.timestamp - b.timestamp);
 
-    const recent = history[history.length - 1];
-    const old = history.find((s) => s.timestamp >= cutoff);
+    if (history.length < 2) continue;
 
-    if (!recent || !old) continue;
+    const recent = history[history.length - 1];
+
+    let old = history
+      .filter((s) => s.timestamp <= cutoff)
+      .sort((a, b) => b.timestamp - a.timestamp)[0];
+
+    if (!old) {
+      old = history[0];
+    }
+
+    const gain = recent.views - old.views;
 
     results.push({
       name: channel.name,
       url: channel.url,
       avatar: channel.avatar,
-      gain: recent.views - old.views,
+      gain,
       views: recent.views,
       subscribers: recent.subscribers,
     });
@@ -257,14 +270,16 @@ function getLeaderboard(periodMs) {
   return results.sort((a, b) => b.gain - a.gain);
 }
 
-function buildLeaderboardEmbed() {
+async function buildLeaderboardEmbed() {
+  await updateStats();
+
   const data = getLeaderboard(24 * 60 * 60 * 1000).slice(0, 10);
 
   const embed = new EmbedBuilder()
     .setTitle("Top Channels - 24 Hours")
     .setDescription("View count gains for the last 24 hours")
     .setColor(FLUX_PURPLE)
-    .setFooter({ text: "Flux • Updates every 1 minute" })
+    .setFooter({ text: "Flux • Freshly updated" })
     .setTimestamp();
 
   if (data.length > 0 && data[0].avatar) {
@@ -274,7 +289,7 @@ function buildLeaderboardEmbed() {
   if (data.length === 0) {
     embed.addFields({
       name: "No data yet",
-      value: "Wait a bit for stats to be collected.",
+      value: "Flux needs at least 2 saved stat updates to calculate gains.",
     });
     return embed;
   }
@@ -425,7 +440,8 @@ client.on("messageCreate", async (message) => {
   }
 
   if (command === "leaderboard") {
-    return message.reply({ embeds: [buildLeaderboardEmbed()] });
+    const embed = await buildLeaderboardEmbed();
+    return message.reply({ embeds: [embed] });
   }
 
   if (command === "monitoradd") {
