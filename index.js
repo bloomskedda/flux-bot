@@ -4,12 +4,19 @@ if (process.env.NODE_ENV !== "production") {
 
 const fs = require("fs");
 const cron = require("node-cron");
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  PermissionsBitField,
+} = require("discord.js");
 
 const CHANNELS_FILE = "./channels.json";
 const STATS_FILE = "./stats.json";
 const MONITORS_FILE = "./monitors.json";
+
 const PREFIX = "!";
+const MOD_PREFIX = "?";
 const FLUX_PURPLE = 0x7b2cff;
 
 const client = new Client({
@@ -25,6 +32,7 @@ function loadJson(file) {
     fs.writeFileSync(file, "[]");
     return [];
   }
+
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
@@ -291,6 +299,7 @@ async function buildLeaderboardEmbed() {
       name: "No data yet",
       value: "Flux needs at least 2 saved stat updates to calculate gains.",
     });
+
     return embed;
   }
 
@@ -334,6 +343,14 @@ function buildCommandsEmbed() {
         value: "Sends a test upload notification using the first monitor.",
       },
       {
+        name: "?purge <number>",
+        value: "Deletes a specific number of recent messages. Requires Manage Messages.",
+      },
+      {
+        name: "?purge all",
+        value: "Deletes as many recent messages as Discord allows. Requires Manage Messages.",
+      },
+      {
         name: "!commands",
         value: "Shows this command list.",
       }
@@ -346,7 +363,9 @@ async function sendTestNotification(message) {
   const monitors = loadMonitors();
 
   if (monitors.length === 0) {
-    return message.reply("No monitors found. Add one first with `!monitoradd <Discord channel ID> <YouTube channel URL>`.");
+    return message.reply(
+      "No monitors found. Add one first with `!monitoradd <Discord channel ID> <YouTube channel URL>`."
+    );
   }
 
   try {
@@ -389,6 +408,79 @@ async function sendTestNotification(message) {
   }
 }
 
+async function handlePurgeCommand(message, args) {
+  if (!message.guild) return;
+
+  if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+    return message.reply("❌ You need **Manage Messages** permission to use this.");
+  }
+
+  const botMember = message.guild.members.me;
+
+  if (!botMember.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+    return message.reply("❌ I need **Manage Messages** permission to delete messages.");
+  }
+
+  const option = args[0];
+
+  if (!option) {
+    return message.reply("Use: `?purge <number>` or `?purge all`");
+  }
+
+  if (option.toLowerCase() === "all") {
+    let totalDeleted = 0;
+
+    while (true) {
+      const fetchedMessages = await message.channel.messages.fetch({
+        limit: 100,
+      });
+
+      if (fetchedMessages.size === 0) break;
+
+      const deletableMessages = fetchedMessages.filter(
+        (msg) => Date.now() - msg.createdTimestamp < 14 * 24 * 60 * 60 * 1000
+      );
+
+      if (deletableMessages.size === 0) break;
+
+      const deleted = await message.channel.bulkDelete(deletableMessages, true);
+      totalDeleted += deleted.size;
+
+      if (deleted.size < 100) break;
+    }
+
+    const confirmation = await message.channel.send(
+      `🧹 Deleted **${totalDeleted}** messages.`
+    );
+
+    setTimeout(() => {
+      confirmation.delete().catch(() => {});
+    }, 5000);
+
+    return;
+  }
+
+  const amount = Number(option);
+
+  if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
+    return message.reply("Please enter a number between **1** and **100**.");
+  }
+
+  const fetchedMessages = await message.channel.messages.fetch({
+    limit: amount + 1,
+  });
+
+  const deleted = await message.channel.bulkDelete(fetchedMessages, true);
+
+  const confirmation = await message.channel.send(
+    `🧹 Deleted **${deleted.size}** messages.`
+  );
+
+  setTimeout(() => {
+    confirmation.delete().catch(() => {});
+  }, 5000);
+}
+
 client.once("ready", async () => {
   console.log(`Bot is online as ${client.user.tag}`);
 
@@ -403,10 +495,20 @@ client.once("ready", async () => {
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+
+  if (message.content.startsWith(MOD_PREFIX)) {
+    const args = message.content.slice(MOD_PREFIX.length).trim().split(/\s+/);
+    const command = args.shift()?.toLowerCase();
+
+    if (command === "purge") {
+      return handlePurgeCommand(message, args);
+    }
+  }
+
   if (!message.content.startsWith(PREFIX)) return;
 
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const command = args.shift().toLowerCase();
+  const command = args.shift()?.toLowerCase();
 
   if (command === "commands") {
     return message.reply({ embeds: [buildCommandsEmbed()] });
@@ -418,7 +520,10 @@ client.on("messageCreate", async (message) => {
 
   if (command === "add") {
     const url = args[0];
-    if (!url) return message.reply("Use: `!add <YouTube channel URL>`");
+
+    if (!url) {
+      return message.reply("Use: `!add <YouTube channel URL>`");
+    }
 
     try {
       const channels = loadChannels();
@@ -430,6 +535,7 @@ client.on("messageCreate", async (message) => {
 
       channels.push(channel);
       saveChannels(channels);
+
       await updateStats();
 
       return message.reply(`Added **${channel.name}**`);
@@ -513,6 +619,7 @@ client.on("messageCreate", async (message) => {
       let monitors = loadMonitors();
 
       const before = monitors.length;
+
       monitors = monitors.filter(
         (m) => m.youtubeChannelId !== youtubeChannel.channelId
       );
