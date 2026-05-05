@@ -76,6 +76,30 @@ function getMedal(index) {
   return `#${index + 1}`;
 }
 
+function getLeaderboardSettings(periodArg) {
+  if (periodArg === "weekly") {
+    return {
+      title: "Top Channels - Weekly",
+      description: "View count gains for the last 7 days",
+      ms: 7 * 24 * 60 * 60 * 1000,
+    };
+  }
+
+  if (periodArg === "monthly") {
+    return {
+      title: "Top Channels - Monthly",
+      description: "View count gains for the last 30 days",
+      ms: 30 * 24 * 60 * 60 * 1000,
+    };
+  }
+
+  return {
+    title: "Top Channels - 24 Hours",
+    description: "View count gains for the last 24 hours",
+    ms: 24 * 60 * 60 * 1000,
+  };
+}
+
 async function getChannelFromUrl(url) {
   let apiUrl;
 
@@ -278,14 +302,15 @@ function getLeaderboard(periodMs) {
   return results.sort((a, b) => b.gain - a.gain);
 }
 
-async function buildLeaderboardEmbed() {
+async function buildLeaderboardEmbed(periodArg) {
   await updateStats();
 
-  const data = getLeaderboard(24 * 60 * 60 * 1000).slice(0, 10);
+  const settings = getLeaderboardSettings(periodArg);
+  const data = getLeaderboard(settings.ms).slice(0, 10);
 
   const embed = new EmbedBuilder()
-    .setTitle("Top Channels - 24 Hours")
-    .setDescription("View count gains for the last 24 hours")
+    .setTitle(settings.title)
+    .setDescription(settings.description)
     .setColor(FLUX_PURPLE)
     .setFooter({ text: "Flux • Freshly updated" })
     .setTimestamp();
@@ -327,8 +352,20 @@ function buildCommandsEmbed() {
         value: "Adds a YouTube channel to the stats tracker.",
       },
       {
+        name: "!remove <YouTube channel URL>",
+        value: "Removes a YouTube channel from the stats leaderboard tracker.",
+      },
+      {
         name: "!leaderboard",
         value: "Shows the top tracked channels by view gains in the last 24 hours.",
+      },
+      {
+        name: "!leaderboard weekly",
+        value: "Shows the top tracked channels by view gains in the last 7 days.",
+      },
+      {
+        name: "!leaderboard monthly",
+        value: "Shows the top tracked channels by view gains in the last 30 days.",
       },
       {
         name: "!monitoradd <Discord channel ID> <YouTube channel URL>",
@@ -545,8 +582,46 @@ client.on("messageCreate", async (message) => {
     }
   }
 
+  if (command === "remove") {
+    const url = args[0];
+
+    if (!url) {
+      return message.reply("Use: `!remove <YouTube channel URL>`");
+    }
+
+    try {
+      const channelToRemove = await getChannelFromUrl(url);
+      let channels = loadChannels();
+
+      const before = channels.length;
+
+      channels = channels.filter(
+        (channel) => channel.channelId !== channelToRemove.channelId
+      );
+
+      if (channels.length === before) {
+        return message.reply("That YouTube channel is not in the leaderboard tracker.");
+      }
+
+      saveChannels(channels);
+
+      return message.reply(`✅ Removed **${channelToRemove.name}** from the leaderboard tracker.`);
+    } catch (error) {
+      console.error(error);
+      return message.reply("Could not remove that channel.");
+    }
+  }
+
   if (command === "leaderboard") {
-    const embed = await buildLeaderboardEmbed();
+    const periodArg = args[0]?.toLowerCase();
+
+    if (periodArg && !["weekly", "monthly"].includes(periodArg)) {
+      return message.reply(
+        "Use one of these:\n`!leaderboard`\n`!leaderboard weekly`\n`!leaderboard monthly`"
+      );
+    }
+
+    const embed = await buildLeaderboardEmbed(periodArg);
     return message.reply({ embeds: [embed] });
   }
 
