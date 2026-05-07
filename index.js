@@ -783,7 +783,7 @@ async function buildStatsChooser(channel) {
     new ButtonBuilder()
       .setCustomId(`stats:daily:${channel.channelId}`)
       .setLabel("Daily")
-      .setStyle(ButtonStyle.Primary),
+      .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(`stats:weekly:${channel.channelId}`)
       .setLabel("Weekly")
@@ -1128,7 +1128,9 @@ client.on("messageCreate", async (message) => {
 
       const { embed, row } = await buildStatsChooser(channel);
 
-      return message.reply({
+      await message.delete().catch(() => {});
+
+      return message.channel.send({
         embeds: [embed],
         components: [row],
       });
