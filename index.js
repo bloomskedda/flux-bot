@@ -249,11 +249,7 @@ async function fetchChannelById(channelId) {
 
 async function fetchChannelByHandle(handle) {
   const cleanHandle = handle.replace(/^@/, "");
-
-  const attempts = [
-    cleanHandle,
-    `@${cleanHandle}`,
-  ];
+  const attempts = [cleanHandle, `@${cleanHandle}`];
 
   for (const handleAttempt of attempts) {
     const apiUrl =
@@ -394,7 +390,9 @@ async function getChannelFromUrl(url) {
     url: parsed.cleanUrl,
     channelId: channel.id,
     name: channel.snippet.title,
-    avatar: channel.snippet.thumbnails.high?.url || channel.snippet.thumbnails.default?.url,
+    avatar:
+      channel.snippet.thumbnails.high?.url ||
+      channel.snippet.thumbnails.default?.url,
     uploadsPlaylistId: channel.contentDetails.relatedPlaylists.uploads,
     subscribers: channel.statistics.hiddenSubscriberCount
       ? null
@@ -509,7 +507,9 @@ async function checkUploads() {
         console.log(`New upload sent for ${monitor.youtube_name}`);
       }
     } catch (error) {
-      console.log(`Upload check failed for ${monitor.youtube_name}: ${error.message}`);
+      console.log(
+        `Upload check failed for ${monitor.youtube_name}: ${error.message}`
+      );
     }
   }
 }
@@ -549,8 +549,6 @@ async function getLeaderboard(periodMs) {
 }
 
 async function buildLeaderboardEmbed(periodArg) {
-  await updateStats();
-
   const settings = getLeaderboardSettings(periodArg);
   const data = (await getLeaderboard(settings.ms)).slice(0, 10);
 
@@ -558,7 +556,7 @@ async function buildLeaderboardEmbed(periodArg) {
     .setTitle(settings.title)
     .setDescription(settings.description)
     .setColor(FLUX_PURPLE)
-    .setFooter({ text: "Flux • Freshly updated" })
+    .setFooter({ text: "Flux • Stats update every hour" })
     .setTimestamp();
 
   if (data.length > 0 && data[0].avatar) {
@@ -704,7 +702,9 @@ async function handlePurgeCommand(message, args) {
   const botMember = message.guild.members.me;
 
   if (!botMember.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-    return message.reply("❌ I need **Manage Messages** permission to delete messages.");
+    return message.reply(
+      "❌ I need **Manage Messages** permission to delete messages."
+    );
   }
 
   const option = args[0];
@@ -771,11 +771,18 @@ client.once("ready", async () => {
   console.log(`Bot is online as ${client.user.tag}`);
 
   await initDatabase();
+
+  // One startup update
   await updateStats();
   await checkUploads();
 
-  cron.schedule("*/1 * * * *", async () => {
+  // Leaderboard/stat data updates every 1 hour
+  cron.schedule("0 * * * *", async () => {
     await updateStats();
+  });
+
+  // Upload monitoring checks every 5 minutes
+  cron.schedule("*/5 * * * *", async () => {
     await checkUploads();
   });
 });
@@ -816,9 +823,16 @@ client.on("messageCreate", async (message) => {
       const channel = await getChannelFromUrl(url);
 
       await saveChannel(channel);
-      await updateStats();
 
-      return message.reply(`✅ Added **${channel.name}** to the leaderboard tracker.`);
+      // Save first stat immediately for this channel only
+      await saveStats(channel.channelId, {
+        views: channel.views,
+        subscribers: channel.subscribers,
+      });
+
+      return message.reply(
+        `✅ Added **${channel.name}** to the leaderboard tracker.`
+      );
     } catch (error) {
       console.error(error);
       return message.reply(`Error adding channel: ${error.message}`);
