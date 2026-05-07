@@ -2,8 +2,8 @@ if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
 }
 
-const fs = require("fs");
 const cron = require("node-cron");
+const { Pool } = require("pg");
 const {
   Client,
   GatewayIntentBits,
@@ -11,13 +11,17 @@ const {
   PermissionsBitField,
 } = require("discord.js");
 
-const CHANNELS_FILE = "./channels.json";
-const STATS_FILE = "./stats.json";
-const MONITORS_FILE = "./monitors.json";
-
 const PREFIX = "!";
 const MOD_PREFIX = "?";
 const FLUX_PURPLE = 0x7b2cff;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false,
+});
 
 const client = new Client({
   intents: [
@@ -26,43 +30,6 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
-
-function loadJson(file) {
-  if (!fs.existsSync(file)) {
-    fs.writeFileSync(file, "[]");
-    return [];
-  }
-
-  return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-function saveJson(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2));
-}
-
-function loadChannels() {
-  return loadJson(CHANNELS_FILE);
-}
-
-function saveChannels(channels) {
-  saveJson(CHANNELS_FILE, channels);
-}
-
-function loadStats() {
-  return loadJson(STATS_FILE);
-}
-
-function saveStats(stats) {
-  saveJson(STATS_FILE, stats);
-}
-
-function loadMonitors() {
-  return loadJson(MONITORS_FILE);
-}
-
-function saveMonitors(monitors) {
-  saveJson(MONITORS_FILE, monitors);
-}
 
 function formatNumber(num) {
   if (num === null || num === undefined) return "Hidden";
@@ -98,6 +65,162 @@ function getLeaderboardSettings(periodArg) {
     description: "View count gains for the last 24 hours",
     ms: 24 * 60 * 60 * 1000,
   };
+}
+
+async function initDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS channels (
+      channel_id TEXT PRIMARY KEY,
+      url TEXT NOT NULL,
+      name TEXT NOT NULL,
+      avatar TEXT,
+      uploads_playlist_id TEXT,
+      subscribers BIGINT,
+      views BIGINT,
+      videos BIGINT,
+      added_at BIGINT NOT NULL
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stats (
+      id SERIAL PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      views BIGINT NOT NULL,
+      subscribers BIGINT,
+      timestamp BIGINT NOT NULL
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS monitors (
+      youtube_channel_id TEXT PRIMARY KEY,
+      discord_channel_id TEXT NOT NULL,
+      youtube_url TEXT NOT NULL,
+      youtube_name TEXT NOT NULL,
+      youtube_avatar TEXT,
+      uploads_playlist_id TEXT NOT NULL,
+      webhook_id TEXT NOT NULL,
+      webhook_token TEXT NOT NULL,
+      last_video_id TEXT,
+      added_at BIGINT NOT NULL
+    );
+  `);
+
+  console.log("Database ready.");
+}
+
+async function getAllChannels() {
+  const result = await pool.query("SELECT * FROM channels");
+  return result.rows;
+}
+
+async function saveChannel(channel) {
+  await pool.query(
+    `
+    INSERT INTO channels (
+      channel_id, url, name, avatar, uploads_playlist_id,
+      subscribers, views, videos, added_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    ON CONFLICT (channel_id)
+    DO UPDATE SET
+      url = EXCLUDED.url,
+      name = EXCLUDED.name,
+      avatar = EXCLUDED.avatar,
+      uploads_playlist_id = EXCLUDED.uploads_playlist_id,
+      subscribers = EXCLUDED.subscribers,
+      views = EXCLUDED.views,
+      videos = EXCLUDED.videos;
+    `,
+    [
+      channel.channelId,
+      channel.url,
+      channel.name,
+      channel.avatar,
+      channel.uploadsPlaylistId,
+      channel.subscribers,
+      channel.views,
+      channel.videos,
+      channel.addedAt,
+    ]
+  );
+}
+
+async function removeChannel(channelId) {
+  await pool.query("DELETE FROM channels WHERE channel_id = $1", [channelId]);
+}
+
+async function getAllMonitors() {
+  const result = await pool.query("SELECT * FROM monitors");
+  return result.rows;
+}
+
+async function saveMonitor(monitor) {
+  await pool.query(
+    `
+    INSERT INTO monitors (
+      youtube_channel_id, discord_channel_id, youtube_url, youtube_name,
+      youtube_avatar, uploads_playlist_id, webhook_id, webhook_token,
+      last_video_id, added_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    ON CONFLICT (youtube_channel_id)
+    DO UPDATE SET
+      discord_channel_id = EXCLUDED.discord_channel_id,
+      youtube_url = EXCLUDED.youtube_url,
+      youtube_name = EXCLUDED.youtube_name,
+      youtube_avatar = EXCLUDED.youtube_avatar,
+      uploads_playlist_id = EXCLUDED.uploads_playlist_id,
+      webhook_id = EXCLUDED.webhook_id,
+      webhook_token = EXCLUDED.webhook_token,
+      last_video_id = EXCLUDED.last_video_id;
+    `,
+    [
+      monitor.youtubeChannelId,
+      monitor.discordChannelId,
+      monitor.youtubeUrl,
+      monitor.youtubeName,
+      monitor.youtubeAvatar,
+      monitor.uploadsPlaylistId,
+      monitor.webhookId,
+      monitor.webhookToken,
+      monitor.lastVideoId,
+      monitor.addedAt,
+    ]
+  );
+}
+
+async function removeMonitor(channelId) {
+  await pool.query("DELETE FROM monitors WHERE youtube_channel_id = $1", [
+    channelId,
+  ]);
+}
+
+async function updateMonitorLastVideo(channelId, videoId) {
+  await pool.query(
+    "UPDATE monitors SET last_video_id = $1 WHERE youtube_channel_id = $2",
+    [videoId, channelId]
+  );
+}
+
+async function saveStats(channelId, stats) {
+  await pool.query(
+    `
+    INSERT INTO stats (channel_id, views, subscribers, timestamp)
+    VALUES ($1, $2, $3, $4)
+    `,
+    [channelId, stats.views, stats.subscribers, Date.now()]
+  );
+}
+
+async function getStatsForChannel(channelId) {
+  const result = await pool.query(
+    "SELECT * FROM stats WHERE channel_id = $1 ORDER BY timestamp ASC",
+    [channelId]
+  );
+
+  return result.rows;
 }
 
 async function getChannelFromUrl(url) {
@@ -178,62 +301,49 @@ async function getLatestVideo(uploadsPlaylistId) {
 async function updateStats() {
   console.log("Updating channel stats...");
 
-  const channels = loadChannels();
-  const statsHistory = loadStats();
-  const now = Date.now();
+  const channels = await getAllChannels();
 
   for (const channel of channels) {
     try {
-      const stats = await fetchChannelStats(channel.channelId);
+      const stats = await fetchChannelStats(channel.channel_id);
       if (!stats) continue;
 
-      statsHistory.push({
-        channelId: channel.channelId,
-        views: stats.views,
-        subscribers: stats.subscribers,
-        timestamp: now,
-      });
-
+      await saveStats(channel.channel_id, stats);
       console.log(`Updated ${channel.name}`);
-    } catch {
+    } catch (error) {
       console.log(`Failed to update ${channel.name}`);
     }
   }
-
-  saveStats(statsHistory);
 }
 
 async function checkUploads() {
   console.log("Checking monitored uploads...");
 
-  const monitors = loadMonitors();
-  let changed = false;
+  const monitors = await getAllMonitors();
 
   for (const monitor of monitors) {
     try {
-      const latest = await getLatestVideo(monitor.uploadsPlaylistId);
+      const latest = await getLatestVideo(monitor.uploads_playlist_id);
       if (!latest) continue;
 
-      if (!monitor.lastVideoId) {
-        monitor.lastVideoId = latest.videoId;
-        changed = true;
+      if (!monitor.last_video_id) {
+        await updateMonitorLastVideo(monitor.youtube_channel_id, latest.videoId);
         continue;
       }
 
-      if (latest.videoId !== monitor.lastVideoId) {
-        monitor.lastVideoId = latest.videoId;
-        changed = true;
+      if (latest.videoId !== monitor.last_video_id) {
+        await updateMonitorLastVideo(monitor.youtube_channel_id, latest.videoId);
 
         const webhook = await client.fetchWebhook(
-          monitor.webhookId,
-          monitor.webhookToken
+          monitor.webhook_id,
+          monitor.webhook_token
         );
 
         const embed = new EmbedBuilder()
           .setTitle("New Upload Detected")
-          .setDescription(`**${monitor.youtubeName}** uploaded a new video.`)
+          .setDescription(`**${monitor.youtube_name}** uploaded a new video.`)
           .setColor(FLUX_PURPLE)
-          .setThumbnail(monitor.youtubeAvatar)
+          .setThumbnail(monitor.youtube_avatar)
           .setImage(latest.thumbnail)
           .addFields(
             {
@@ -242,7 +352,7 @@ async function checkUploads() {
             },
             {
               name: "Channel",
-              value: `[${monitor.youtubeName}](${monitor.youtubeUrl})`,
+              value: `[${monitor.youtube_name}](${monitor.youtube_url})`,
             }
           )
           .setFooter({ text: "Flux • YouTube upload monitor" })
@@ -254,48 +364,42 @@ async function checkUploads() {
           embeds: [embed],
         });
 
-        console.log(`New upload sent for ${monitor.youtubeName}`);
+        console.log(`New upload sent for ${monitor.youtube_name}`);
       }
-    } catch {
-      console.log(`Upload check failed for ${monitor.youtubeName}`);
+    } catch (error) {
+      console.log(`Upload check failed for ${monitor.youtube_name}`);
     }
   }
-
-  if (changed) saveMonitors(monitors);
 }
 
-function getLeaderboard(periodMs) {
-  const stats = loadStats();
-  const channels = loadChannels();
+async function getLeaderboard(periodMs) {
+  const channels = await getAllChannels();
   const cutoff = Date.now() - periodMs;
   const results = [];
 
   for (const channel of channels) {
-    const history = stats
-      .filter((s) => s.channelId === channel.channelId)
-      .sort((a, b) => a.timestamp - b.timestamp);
+    const history = await getStatsForChannel(channel.channel_id);
 
     if (history.length < 2) continue;
 
     const recent = history[history.length - 1];
 
     let old = history
-      .filter((s) => s.timestamp <= cutoff)
-      .sort((a, b) => b.timestamp - a.timestamp)[0];
+      .filter((s) => Number(s.timestamp) <= cutoff)
+      .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
 
-    if (!old) {
-      old = history[0];
-    }
+    if (!old) old = history[0];
 
-    const gain = recent.views - old.views;
+    const gain = Number(recent.views) - Number(old.views);
 
     results.push({
       name: channel.name,
       url: channel.url,
       avatar: channel.avatar,
       gain,
-      views: recent.views,
-      subscribers: recent.subscribers,
+      views: Number(recent.views),
+      subscribers:
+        recent.subscribers === null ? null : Number(recent.subscribers),
     });
   }
 
@@ -306,7 +410,7 @@ async function buildLeaderboardEmbed(periodArg) {
   await updateStats();
 
   const settings = getLeaderboardSettings(periodArg);
-  const data = getLeaderboard(settings.ms).slice(0, 10);
+  const data = (await getLeaderboard(settings.ms)).slice(0, 10);
 
   const embed = new EmbedBuilder()
     .setTitle(settings.title)
@@ -369,7 +473,8 @@ function buildCommandsEmbed() {
       },
       {
         name: "!monitoradd <Discord channel ID> <YouTube channel URL>",
-        value: "Monitors a YouTube channel and sends new upload notifications using a webhook.",
+        value:
+          "Monitors a YouTube channel and sends new upload notifications using a webhook.",
       },
       {
         name: "!monitorremove <YouTube channel URL>",
@@ -381,11 +486,13 @@ function buildCommandsEmbed() {
       },
       {
         name: "?purge <number>",
-        value: "Deletes a specific number of recent messages. Requires Manage Messages.",
+        value:
+          "Deletes a specific number of recent messages. Requires Manage Messages.",
       },
       {
         name: "?purge all",
-        value: "Deletes as many recent messages as Discord allows. Requires Manage Messages.",
+        value:
+          "Deletes as many recent messages as Discord allows. Requires Manage Messages.",
       },
       {
         name: "!commands",
@@ -397,7 +504,7 @@ function buildCommandsEmbed() {
 }
 
 async function sendTestNotification(message) {
-  const monitors = loadMonitors();
+  const monitors = await getAllMonitors();
 
   if (monitors.length === 0) {
     return message.reply(
@@ -409,15 +516,15 @@ async function sendTestNotification(message) {
     const monitor = monitors[0];
 
     const webhook = await client.fetchWebhook(
-      monitor.webhookId,
-      monitor.webhookToken
+      monitor.webhook_id,
+      monitor.webhook_token
     );
 
     const embed = new EmbedBuilder()
       .setTitle("Test Notification")
       .setDescription("This is a test upload notification from Flux.")
       .setColor(FLUX_PURPLE)
-      .setThumbnail(monitor.youtubeAvatar)
+      .setThumbnail(monitor.youtube_avatar)
       .setImage("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
       .addFields(
         {
@@ -426,7 +533,7 @@ async function sendTestNotification(message) {
         },
         {
           name: "Channel",
-          value: `[${monitor.youtubeName}](${monitor.youtubeUrl})`,
+          value: `[${monitor.youtube_name}](${monitor.youtube_url})`,
         }
       )
       .setFooter({ text: "Flux • Test notification" })
@@ -521,6 +628,7 @@ async function handlePurgeCommand(message, args) {
 client.once("ready", async () => {
   console.log(`Bot is online as ${client.user.tag}`);
 
+  await initDatabase();
   await updateStats();
   await checkUploads();
 
@@ -563,19 +671,12 @@ client.on("messageCreate", async (message) => {
     }
 
     try {
-      const channels = loadChannels();
       const channel = await getChannelFromUrl(url);
 
-      if (channels.some((c) => c.channelId === channel.channelId)) {
-        return message.reply("Already tracked.");
-      }
-
-      channels.push(channel);
-      saveChannels(channels);
-
+      await saveChannel(channel);
       await updateStats();
 
-      return message.reply(`Added **${channel.name}**`);
+      return message.reply(`✅ Added **${channel.name}** to the leaderboard tracker.`);
     } catch (error) {
       console.error(error);
       return message.reply("Error adding channel.");
@@ -590,22 +691,13 @@ client.on("messageCreate", async (message) => {
     }
 
     try {
-      const channelToRemove = await getChannelFromUrl(url);
-      let channels = loadChannels();
+      const channel = await getChannelFromUrl(url);
 
-      const before = channels.length;
+      await removeChannel(channel.channelId);
 
-      channels = channels.filter(
-        (channel) => channel.channelId !== channelToRemove.channelId
+      return message.reply(
+        `✅ Removed **${channel.name}** from the leaderboard tracker.`
       );
-
-      if (channels.length === before) {
-        return message.reply("That YouTube channel is not in the leaderboard tracker.");
-      }
-
-      saveChannels(channels);
-
-      return message.reply(`✅ Removed **${channelToRemove.name}** from the leaderboard tracker.`);
     } catch (error) {
       console.error(error);
       return message.reply("Could not remove that channel.");
@@ -645,18 +737,12 @@ client.on("messageCreate", async (message) => {
       const youtubeChannel = await getChannelFromUrl(youtubeUrl);
       const latest = await getLatestVideo(youtubeChannel.uploadsPlaylistId);
 
-      const monitors = loadMonitors();
-
-      if (monitors.some((m) => m.youtubeChannelId === youtubeChannel.channelId)) {
-        return message.reply("That YouTube channel is already being monitored.");
-      }
-
       const webhook = await discordChannel.createWebhook({
         name: "Flux",
         avatar: client.user.displayAvatarURL(),
       });
 
-      monitors.push({
+      await saveMonitor({
         discordChannelId,
         youtubeUrl,
         youtubeChannelId: youtubeChannel.channelId,
@@ -668,8 +754,6 @@ client.on("messageCreate", async (message) => {
         lastVideoId: latest ? latest.videoId : null,
         addedAt: Date.now(),
       });
-
-      saveMonitors(monitors);
 
       return message.reply(
         `✅ Monitoring **${youtubeChannel.name}**.\nNew upload notifications will be sent in <#${discordChannelId}>.`
@@ -691,22 +775,12 @@ client.on("messageCreate", async (message) => {
 
     try {
       const youtubeChannel = await getChannelFromUrl(youtubeUrl);
-      let monitors = loadMonitors();
 
-      const before = monitors.length;
-
-      monitors = monitors.filter(
-        (m) => m.youtubeChannelId !== youtubeChannel.channelId
-      );
-
-      if (monitors.length === before) {
-        return message.reply("That YouTube channel is not being monitored.");
-      }
-
-      saveMonitors(monitors);
+      await removeMonitor(youtubeChannel.channelId);
 
       return message.reply(`✅ Removed monitor for **${youtubeChannel.name}**.`);
-    } catch {
+    } catch (error) {
+      console.error(error);
       return message.reply("Could not remove monitor.");
     }
   }
