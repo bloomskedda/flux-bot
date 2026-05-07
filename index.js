@@ -522,26 +522,36 @@ async function getLeaderboard(periodMs) {
   for (const channel of channels) {
     const history = await getStatsForChannel(channel.channel_id);
 
-    if (history.length < 2) continue;
+    const recent = history.length > 0 ? history[history.length - 1] : null;
 
-    const recent = history[history.length - 1];
+    let old = null;
 
-    let old = history
-      .filter((s) => Number(s.timestamp) <= cutoff)
-      .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
+    if (history.length > 0) {
+      old = history
+        .filter((s) => Number(s.timestamp) <= cutoff)
+        .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
 
-    if (!old) old = history[0];
+      if (!old) old = history[0];
+    }
 
-    const gain = Number(recent.views) - Number(old.views);
+    const currentViews = recent ? Number(recent.views) : Number(channel.views || 0);
+    const currentSubscribers =
+      recent && recent.subscribers !== null
+        ? Number(recent.subscribers)
+        : channel.subscribers === null
+        ? null
+        : Number(channel.subscribers);
+
+    const oldViews = old ? Number(old.views) : currentViews;
+    const gain = currentViews - oldViews;
 
     results.push({
       name: channel.name,
       url: channel.url,
       avatar: channel.avatar,
       gain,
-      views: Number(recent.views),
-      subscribers:
-        recent.subscribers === null ? null : Number(recent.subscribers),
+      views: currentViews,
+      subscribers: currentSubscribers,
     });
   }
 
@@ -565,8 +575,8 @@ async function buildLeaderboardEmbed(periodArg) {
 
   if (data.length === 0) {
     embed.addFields({
-      name: "No data yet",
-      value: "Flux needs at least 2 saved stat updates to calculate gains.",
+      name: "No channels yet",
+      value: "Add channels with `!add <YouTube channel URL>`.",
     });
 
     return embed;
@@ -772,16 +782,13 @@ client.once("ready", async () => {
 
   await initDatabase();
 
-  // One startup update
   await updateStats();
   await checkUploads();
 
-  // Leaderboard/stat data updates every 1 hour
   cron.schedule("0 * * * *", async () => {
     await updateStats();
   });
 
-  // Upload monitoring checks every 5 minutes
   cron.schedule("*/5 * * * *", async () => {
     await checkUploads();
   });
@@ -824,7 +831,6 @@ client.on("messageCreate", async (message) => {
 
       await saveChannel(channel);
 
-      // Save first stat immediately for this channel only
       await saveStats(channel.channelId, {
         views: channel.views,
         subscribers: channel.subscribers,
