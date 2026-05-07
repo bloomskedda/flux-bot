@@ -17,6 +17,7 @@ const {
 const PREFIX = "!";
 const MOD_PREFIX = "?";
 const FLUX_PURPLE = 0x7b2cff;
+const STATS_REFRESH_COOLDOWN = 30 * 60 * 1000;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -323,6 +324,23 @@ async function getStatsForChannel(channelId) {
   return result.rows;
 }
 
+async function getLatestStatsTimestamp() {
+  const result = await pool.query("SELECT MAX(timestamp) AS latest FROM stats");
+  return result.rows[0]?.latest ? Number(result.rows[0].latest) : 0;
+}
+
+async function refreshStatsIfNeeded() {
+  const latestTimestamp = await getLatestStatsTimestamp();
+  const age = Date.now() - latestTimestamp;
+
+  if (!latestTimestamp || age > STATS_REFRESH_COOLDOWN) {
+    console.log("[AUTO REFRESH] Stats are old. Refreshing now...");
+    await updateStats();
+  } else {
+    console.log(`[AUTO REFRESH] Stats are fresh. Age: ${Math.round(age / 60000)} minutes`);
+  }
+}
+
 async function fetchYouTubeJson(apiUrl) {
   const res = await fetch(apiUrl);
   const data = await res.json();
@@ -538,7 +556,7 @@ async function getLatestVideo(uploadsPlaylistId) {
 }
 
 async function updateStats() {
-  console.log("Updating channel stats...");
+  console.log("[STATS] Updating channel stats...");
 
   const channels = await getAllChannels();
 
@@ -548,9 +566,12 @@ async function updateStats() {
       if (!stats) continue;
 
       await saveStats(channel.channel_id, stats);
-      console.log(`Updated ${channel.name}`);
+
+      console.log(
+        `[STATS UPDATED] ${channel.name} | Views: ${stats.views} | Subs: ${stats.subscribers}`
+      );
     } catch (error) {
-      console.log(`Failed to update ${channel.name}: ${error.message}`);
+      console.log(`[STATS FAILED] ${channel.name}: ${error.message}`);
     }
   }
 }
@@ -828,6 +849,8 @@ async function buildLeaderboardChooser() {
 }
 
 async function buildLeaderboardEmbed(periodArg) {
+  await refreshStatsIfNeeded();
+
   const settings = getLeaderboardSettings(periodArg);
   const data = (await getLeaderboard(settings.ms)).slice(0, 10);
 
@@ -835,7 +858,7 @@ async function buildLeaderboardEmbed(periodArg) {
     .setTitle(settings.title)
     .setDescription(settings.description)
     .setColor(FLUX_PURPLE)
-    .setFooter({ text: "Flux • Stats update every hour" })
+    .setFooter({ text: "Flux • Auto-refreshes when stats are older than 30 minutes" })
     .setTimestamp();
 
   if (data.length > 0 && data[0].avatar) {
