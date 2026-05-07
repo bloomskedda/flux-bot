@@ -797,6 +797,36 @@ async function buildStatsChooser(channel) {
   return { embed, row };
 }
 
+async function buildLeaderboardChooser() {
+  const embed = new EmbedBuilder()
+    .setTitle("Flux Leaderboard")
+    .setDescription("Choose the leaderboard timeframe you want to view.")
+    .setColor(FLUX_PURPLE)
+    .addFields({
+      name: "Available leaderboards",
+      value: "Daily, Weekly, Monthly",
+    })
+    .setFooter({ text: "Flux • Click a button below" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("leaderboard:daily")
+      .setLabel("Daily")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("leaderboard:weekly")
+      .setLabel("Weekly")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("leaderboard:monthly")
+      .setLabel("Monthly")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return { embed, row };
+}
+
 async function buildLeaderboardEmbed(periodArg) {
   const settings = getLeaderboardSettings(periodArg);
   const data = (await getLeaderboard(settings.ms)).slice(0, 10);
@@ -850,15 +880,15 @@ function buildCommandsEmbed() {
       },
       {
         name: "!leaderboard",
-        value: "Shows the top tracked channels by view gains in the last 24 hours.",
+        value: "Opens leaderboard buttons for Daily, Weekly, and Monthly.",
       },
       {
         name: "!leaderboard weekly",
-        value: "Shows the top tracked channels by view gains in the last 7 days.",
+        value: "Shows the weekly leaderboard directly.",
       },
       {
         name: "!leaderboard monthly",
-        value: "Shows the top tracked channels by view gains in the last 30 days.",
+        value: "Shows the monthly leaderboard directly.",
       },
       {
         name: "!stats <YouTube channel URL>",
@@ -1040,18 +1070,33 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isButton()) return;
 
-  const [type, period, channelId] = interaction.customId.split(":");
+  const parts = interaction.customId.split(":");
 
-  if (type !== "stats") return;
+  if (parts[0] === "stats") {
+    const [, period, channelId] = parts;
 
-  await interaction.deferUpdate();
+    await interaction.deferUpdate();
 
-  const embed = await buildStatsResultEmbed(channelId, period);
+    const embed = await buildStatsResultEmbed(channelId, period);
 
-  return interaction.editReply({
-    embeds: [embed],
-    components: [],
-  });
+    return interaction.editReply({
+      embeds: [embed],
+      components: [],
+    });
+  }
+
+  if (parts[0] === "leaderboard") {
+    const period = parts[1];
+
+    await interaction.deferUpdate();
+
+    const embed = await buildLeaderboardEmbed(period);
+
+    return interaction.editReply({
+      embeds: [embed],
+      components: [],
+    });
+  }
 });
 
 client.on("messageCreate", async (message) => {
@@ -1164,10 +1209,21 @@ client.on("messageCreate", async (message) => {
   if (command === "leaderboard") {
     const periodArg = args[0]?.toLowerCase();
 
-    if (periodArg && !["weekly", "monthly"].includes(periodArg)) {
+    if (periodArg && !["weekly", "monthly", "daily"].includes(periodArg)) {
       return message.reply(
-        "Use one of these:\n`!leaderboard`\n`!leaderboard weekly`\n`!leaderboard monthly`"
+        "Use one of these:\n`!leaderboard`\n`!leaderboard daily`\n`!leaderboard weekly`\n`!leaderboard monthly`"
       );
+    }
+
+    if (!periodArg) {
+      const { embed, row } = await buildLeaderboardChooser();
+
+      await message.delete().catch(() => {});
+
+      return message.channel.send({
+        embeds: [embed],
+        components: [row],
+      });
     }
 
     const embed = await buildLeaderboardEmbed(periodArg);
