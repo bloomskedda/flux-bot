@@ -9,6 +9,9 @@ const {
   GatewayIntentBits,
   EmbedBuilder,
   PermissionsBitField,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require("discord.js");
 
 const PREFIX = "!";
@@ -34,6 +37,17 @@ const client = new Client({
 function formatNumber(num) {
   if (num === null || num === undefined) return "Hidden";
   return Number(num).toLocaleString();
+}
+
+function formatSigned(num) {
+  const n = Number(num || 0);
+  return `${n >= 0 ? "+" : ""}${formatNumber(n)}`;
+}
+
+function formatPercent(current, previous) {
+  if (!previous || previous === 0) return "No previous data";
+  const percent = ((current - previous) / previous) * 100;
+  return `${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%`;
 }
 
 function getMedal(index) {
@@ -63,6 +77,33 @@ function getLeaderboardSettings(periodArg) {
   return {
     title: "Top Channels - 24 Hours",
     description: "View count gains for the last 24 hours",
+    ms: 24 * 60 * 60 * 1000,
+  };
+}
+
+function getStatsPeriodSettings(period) {
+  if (period === "weekly") {
+    return {
+      label: "Weekly",
+      currentLabel: "Last 7 days",
+      previousLabel: "Previous 7 days",
+      ms: 7 * 24 * 60 * 60 * 1000,
+    };
+  }
+
+  if (period === "monthly") {
+    return {
+      label: "Monthly",
+      currentLabel: "Last 30 days",
+      previousLabel: "Previous 30 days",
+      ms: 30 * 24 * 60 * 60 * 1000,
+    };
+  }
+
+  return {
+    label: "Daily",
+    currentLabel: "Last 24 hours",
+    previousLabel: "Previous 24 hours",
     ms: 24 * 60 * 60 * 1000,
   };
 }
@@ -113,6 +154,14 @@ async function initDatabase() {
 async function getAllChannels() {
   const result = await pool.query("SELECT * FROM channels");
   return result.rows;
+}
+
+async function getChannelFromDatabase(channelId) {
+  const result = await pool.query("SELECT * FROM channels WHERE channel_id = $1", [
+    channelId,
+  ]);
+
+  return result.rows[0] || null;
 }
 
 async function saveChannel(channel) {
@@ -183,14 +232,8 @@ async function getOrCreateFluxWebhook(discordChannel) {
 
   if (savedWebhook) {
     try {
-      const webhook = await client.fetchWebhook(
-        savedWebhook.id,
-        savedWebhook.token
-      );
-
-      if (webhook) {
-        return webhook;
-      }
+      const webhook = await client.fetchWebhook(savedWebhook.id, savedWebhook.token);
+      if (webhook) return webhook;
     } catch {
       console.log("Saved webhook no longer works. Creating/finding another one...");
     }
@@ -202,9 +245,7 @@ async function getOrCreateFluxWebhook(discordChannel) {
       (webhook) => webhook.name === "Flux" && webhook.token
     );
 
-    if (existingFluxWebhook) {
-      return existingFluxWebhook;
-    }
+    if (existingFluxWebhook) return existingFluxWebhook;
   } catch {
     console.log("Could not fetch existing webhooks. Trying to create one...");
   }
@@ -581,7 +622,6 @@ async function getLeaderboard(periodMs) {
     const history = await getStatsForChannel(channel.channel_id);
 
     const recent = history.length > 0 ? history[history.length - 1] : null;
-
     let old = null;
 
     if (history.length > 0) {
@@ -614,6 +654,147 @@ async function getLeaderboard(periodMs) {
   }
 
   return results.sort((a, b) => b.gain - a.gain);
+}
+
+function getSnapshotAtOrBefore(history, timestamp) {
+  return history
+    .filter((item) => Number(item.timestamp) <= timestamp)
+    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
+}
+
+async function buildStatsResultEmbed(channelId, period) {
+  const settings = getStatsPeriodSettings(period);
+  const channel = await getChannelFromDatabase(channelId);
+
+  if (!channel) {
+    return new EmbedBuilder()
+      .setTitle("Channel Analytics")
+      .setDescription("This channel is not saved in the database yet.")
+      .setColor(FLUX_PURPLE);
+  }
+
+  const history = await getStatsForChannel(channelId);
+
+  if (history.length === 0) {
+    return new EmbedBuilder()
+      .setTitle(`${channel.name} Analytics`)
+      .setDescription("No stats saved yet. Wait for the next hourly stats update.")
+      .setColor(FLUX_PURPLE)
+      .setThumbnail(channel.avatar || null);
+  }
+
+  const now = Date.now();
+  const currentStart = now - settings.ms;
+  const previousStart = now - settings.ms * 2;
+
+  const latest = history[history.length - 1];
+  const currentStartSnapshot = getSnapshotAtOrBefore(history, currentStart) || history[0];
+  const previousStartSnapshot = getSnapshotAtOrBefore(history, previousStart);
+
+  const currentViewsGain =
+    Number(latest.views) - Number(currentStartSnapshot.views);
+
+  const currentSubsGain =
+    latest.subscribers === null || currentStartSnapshot.subscribers === null
+      ? null
+      : Number(latest.subscribers) - Number(currentStartSnapshot.subscribers);
+
+  let previousViewsGain = null;
+  let previousSubsGain = null;
+
+  if (previousStartSnapshot) {
+    previousViewsGain =
+      Number(currentStartSnapshot.views) - Number(previousStartSnapshot.views);
+
+    previousSubsGain =
+      currentStartSnapshot.subscribers === null ||
+      previousStartSnapshot.subscribers === null
+        ? null
+        : Number(currentStartSnapshot.subscribers) -
+          Number(previousStartSnapshot.subscribers);
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${channel.name} Analytics - ${settings.label}`)
+    .setDescription(`[Open YouTube Channel](${channel.url})`)
+    .setColor(FLUX_PURPLE)
+    .setThumbnail(channel.avatar || null)
+    .addFields(
+      {
+        name: settings.currentLabel,
+        value:
+          `📊 Views gained: **${formatSigned(currentViewsGain)}**\n` +
+          `👥 Subscribers gained: **${
+            currentSubsGain === null ? "Hidden" : formatSigned(currentSubsGain)
+          }**`,
+      },
+      {
+        name: settings.previousLabel,
+        value:
+          previousViewsGain === null
+            ? "Not enough saved history yet."
+            : `📊 Views gained: **${formatSigned(previousViewsGain)}**\n` +
+              `👥 Subscribers gained: **${
+                previousSubsGain === null ? "Hidden" : formatSigned(previousSubsGain)
+              }**`,
+      },
+      {
+        name: "Comparison",
+        value:
+          previousViewsGain === null
+            ? "Comparison will work once Flux has enough saved history."
+            : `📊 Views difference: **${formatPercent(
+                currentViewsGain,
+                previousViewsGain
+              )}**\n` +
+              `👥 Subscribers difference: **${
+                currentSubsGain === null || previousSubsGain === null
+                  ? "Hidden"
+                  : formatPercent(currentSubsGain, previousSubsGain)
+              }**`,
+      },
+      {
+        name: "Current Totals",
+        value:
+          `🎯 Total views: **${formatNumber(latest.views)}**\n` +
+          `👥 Subscribers: **${formatNumber(latest.subscribers)}**`,
+      }
+    )
+    .setFooter({ text: "Flux • Channel analytics" })
+    .setTimestamp();
+
+  return embed;
+}
+
+async function buildStatsChooser(channel) {
+  const embed = new EmbedBuilder()
+    .setTitle(`${channel.name} Analytics`)
+    .setDescription("Choose the timeframe you want to view.")
+    .setColor(FLUX_PURPLE)
+    .setThumbnail(channel.avatar || null)
+    .addFields({
+      name: "Available timeframes",
+      value: "Daily, Weekly, Monthly",
+    })
+    .setFooter({ text: "Flux • Click a button below" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`stats:daily:${channel.channelId}`)
+      .setLabel("Daily")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`stats:weekly:${channel.channelId}`)
+      .setLabel("Weekly")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`stats:monthly:${channel.channelId}`)
+      .setLabel("Monthly")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return { embed, row };
 }
 
 async function buildLeaderboardEmbed(periodArg) {
@@ -678,6 +859,10 @@ function buildCommandsEmbed() {
       {
         name: "!leaderboard monthly",
         value: "Shows the top tracked channels by view gains in the last 30 days.",
+      },
+      {
+        name: "!stats <YouTube channel URL>",
+        value: "Shows channel analytics with daily, weekly, and monthly buttons.",
       },
       {
         name: "!monitoradd <Discord channel ID> <YouTube channel URL>",
@@ -852,6 +1037,23 @@ client.once("ready", async () => {
   });
 });
 
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  const [type, period, channelId] = interaction.customId.split(":");
+
+  if (type !== "stats") return;
+
+  await interaction.deferUpdate();
+
+  const embed = await buildStatsResultEmbed(channelId, period);
+
+  return interaction.editReply({
+    embeds: [embed],
+    components: [],
+  });
+});
+
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
@@ -900,6 +1102,39 @@ client.on("messageCreate", async (message) => {
     } catch (error) {
       console.error(error);
       return message.reply(`Error adding channel: ${error.message}`);
+    }
+  }
+
+  if (command === "stats") {
+    const url = args[0];
+
+    if (!url) {
+      return message.reply("Use: `!stats <YouTube channel URL>`");
+    }
+
+    try {
+      const channel = await getChannelFromUrl(url);
+
+      await saveChannel(channel);
+
+      const history = await getStatsForChannel(channel.channelId);
+
+      if (history.length === 0) {
+        await saveStats(channel.channelId, {
+          views: channel.views,
+          subscribers: channel.subscribers,
+        });
+      }
+
+      const { embed, row } = await buildStatsChooser(channel);
+
+      return message.reply({
+        embeds: [embed],
+        components: [row],
+      });
+    } catch (error) {
+      console.error(error);
+      return message.reply(`Could not load stats: ${error.message}`);
     }
   }
 
