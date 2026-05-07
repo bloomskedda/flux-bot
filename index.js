@@ -157,6 +157,64 @@ async function getAllMonitors() {
   return result.rows;
 }
 
+async function getExistingWebhookForDiscordChannel(discordChannelId) {
+  const result = await pool.query(
+    `
+    SELECT webhook_id, webhook_token
+    FROM monitors
+    WHERE discord_channel_id = $1
+    AND webhook_id IS NOT NULL
+    AND webhook_token IS NOT NULL
+    LIMIT 1
+    `,
+    [discordChannelId]
+  );
+
+  if (result.rows.length === 0) return null;
+
+  return {
+    id: result.rows[0].webhook_id,
+    token: result.rows[0].webhook_token,
+  };
+}
+
+async function getOrCreateFluxWebhook(discordChannel) {
+  const savedWebhook = await getExistingWebhookForDiscordChannel(discordChannel.id);
+
+  if (savedWebhook) {
+    try {
+      const webhook = await client.fetchWebhook(
+        savedWebhook.id,
+        savedWebhook.token
+      );
+
+      if (webhook) {
+        return webhook;
+      }
+    } catch {
+      console.log("Saved webhook no longer works. Creating/finding another one...");
+    }
+  }
+
+  try {
+    const channelWebhooks = await discordChannel.fetchWebhooks();
+    const existingFluxWebhook = channelWebhooks.find(
+      (webhook) => webhook.name === "Flux" && webhook.token
+    );
+
+    if (existingFluxWebhook) {
+      return existingFluxWebhook;
+    }
+  } catch {
+    console.log("Could not fetch existing webhooks. Trying to create one...");
+  }
+
+  return discordChannel.createWebhook({
+    name: "Flux",
+    avatar: client.user.displayAvatarURL(),
+  });
+}
+
 async function saveMonitor(monitor) {
   await pool.query(
     `
@@ -624,7 +682,7 @@ function buildCommandsEmbed() {
       {
         name: "!monitoradd <Discord channel ID> <YouTube channel URL>",
         value:
-          "Monitors a YouTube channel and sends new upload notifications using a webhook.",
+          "Monitors a YouTube channel and sends new upload notifications using a shared webhook.",
       },
       {
         name: "!monitorremove <YouTube channel URL>",
@@ -899,10 +957,7 @@ client.on("messageCreate", async (message) => {
       const youtubeChannel = await getChannelFromUrl(youtubeUrl);
       const latest = await getLatestVideo(youtubeChannel.uploadsPlaylistId);
 
-      const webhook = await discordChannel.createWebhook({
-        name: "Flux",
-        avatar: client.user.displayAvatarURL(),
-      });
+      const webhook = await getOrCreateFluxWebhook(discordChannel);
 
       await saveMonitor({
         discordChannelId,
