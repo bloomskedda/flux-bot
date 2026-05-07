@@ -148,6 +148,7 @@ async function saveChannel(channel) {
 }
 
 async function removeChannel(channelId) {
+  await pool.query("DELETE FROM stats WHERE channel_id = $1", [channelId]);
   await pool.query("DELETE FROM channels WHERE channel_id = $1", [channelId]);
 }
 
@@ -223,33 +224,177 @@ async function getStatsForChannel(channelId) {
   return result.rows;
 }
 
-async function getChannelFromUrl(url) {
-  let apiUrl;
-
-  if (url.includes("/channel/")) {
-    const channelId = url.split("/channel/")[1].split(/[/?#]/)[0];
-    apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,contentDetails&id=${channelId}&key=${process.env.YOUTUBE_API_KEY}`;
-  } else if (url.includes("@")) {
-    const handle = url.split("@")[1].split(/[/?#]/)[0];
-    apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,contentDetails&forHandle=@${handle}&key=${process.env.YOUTUBE_API_KEY}`;
-  } else {
-    throw new Error("Unsupported YouTube URL");
-  }
-
+async function fetchYouTubeJson(apiUrl) {
   const res = await fetch(apiUrl);
   const data = await res.json();
 
-  if (!data.items || data.items.length === 0) {
-    throw new Error("Channel not found");
+  if (data.error) {
+    throw new Error(`YouTube API error: ${data.error.message}`);
   }
 
-  const channel = data.items[0];
+  return data;
+}
+
+async function fetchChannelById(channelId) {
+  const apiUrl =
+    `https://www.googleapis.com/youtube/v3/channels` +
+    `?part=snippet,statistics,contentDetails&id=${encodeURIComponent(channelId)}` +
+    `&key=${process.env.YOUTUBE_API_KEY}`;
+
+  const data = await fetchYouTubeJson(apiUrl);
+
+  if (!data.items || data.items.length === 0) return null;
+  return data.items[0];
+}
+
+async function fetchChannelByHandle(handle) {
+  const cleanHandle = handle.replace(/^@/, "");
+
+  const attempts = [
+    cleanHandle,
+    `@${cleanHandle}`,
+  ];
+
+  for (const handleAttempt of attempts) {
+    const apiUrl =
+      `https://www.googleapis.com/youtube/v3/channels` +
+      `?part=snippet,statistics,contentDetails&forHandle=${encodeURIComponent(handleAttempt)}` +
+      `&key=${process.env.YOUTUBE_API_KEY}`;
+
+    const data = await fetchYouTubeJson(apiUrl);
+
+    if (data.items && data.items.length > 0) {
+      return data.items[0];
+    }
+  }
+
+  return null;
+}
+
+async function fetchChannelByUsername(username) {
+  const apiUrl =
+    `https://www.googleapis.com/youtube/v3/channels` +
+    `?part=snippet,statistics,contentDetails&forUsername=${encodeURIComponent(username)}` +
+    `&key=${process.env.YOUTUBE_API_KEY}`;
+
+  const data = await fetchYouTubeJson(apiUrl);
+
+  if (!data.items || data.items.length === 0) return null;
+  return data.items[0];
+}
+
+async function searchChannel(query) {
+  const cleanQuery = query.replace(/^@/, "");
+
+  const apiUrl =
+    `https://www.googleapis.com/youtube/v3/search` +
+    `?part=snippet&type=channel&maxResults=1&q=${encodeURIComponent(cleanQuery)}` +
+    `&key=${process.env.YOUTUBE_API_KEY}`;
+
+  const data = await fetchYouTubeJson(apiUrl);
+
+  if (!data.items || data.items.length === 0) return null;
+
+  const channelId = data.items[0].snippet.channelId;
+  return fetchChannelById(channelId);
+}
+
+function parseYouTubeUrl(input) {
+  const cleaned = input.trim().replace(/[<>]/g, "");
+
+  let parsed;
+
+  try {
+    parsed = new URL(cleaned);
+  } catch {
+    throw new Error("Invalid YouTube URL.");
+  }
+
+  const parts = parsed.pathname.split("/").filter(Boolean);
+
+  if (parts[0] === "channel" && parts[1]) {
+    return {
+      type: "channelId",
+      value: parts[1],
+      cleanUrl: `https://www.youtube.com/channel/${parts[1]}`,
+    };
+  }
+
+  const handlePart = parts.find((part) => part.startsWith("@"));
+
+  if (handlePart) {
+    const handle = handlePart.replace(/^@/, "");
+    return {
+      type: "handle",
+      value: handle,
+      cleanUrl: `https://www.youtube.com/@${handle}`,
+    };
+  }
+
+  if (parts[0] === "user" && parts[1]) {
+    return {
+      type: "username",
+      value: parts[1],
+      cleanUrl: `https://www.youtube.com/user/${parts[1]}`,
+    };
+  }
+
+  if ((parts[0] === "c" || parts[0] === "shorts") && parts[1]) {
+    return {
+      type: "search",
+      value: parts[1],
+      cleanUrl: cleaned,
+    };
+  }
+
+  if (parts[0]) {
+    return {
+      type: "search",
+      value: parts[0],
+      cleanUrl: cleaned,
+    };
+  }
+
+  throw new Error("Unsupported YouTube URL.");
+}
+
+async function getChannelFromUrl(url) {
+  const parsed = parseYouTubeUrl(url);
+  let channel = null;
+
+  if (parsed.type === "channelId") {
+    channel = await fetchChannelById(parsed.value);
+  }
+
+  if (parsed.type === "handle") {
+    channel = await fetchChannelByHandle(parsed.value);
+
+    if (!channel) {
+      channel = await searchChannel(parsed.value);
+    }
+  }
+
+  if (parsed.type === "username") {
+    channel = await fetchChannelByUsername(parsed.value);
+
+    if (!channel) {
+      channel = await searchChannel(parsed.value);
+    }
+  }
+
+  if (parsed.type === "search") {
+    channel = await searchChannel(parsed.value);
+  }
+
+  if (!channel) {
+    throw new Error(`Channel not found for URL: ${url}`);
+  }
 
   return {
-    url,
+    url: parsed.cleanUrl,
     channelId: channel.id,
     name: channel.snippet.title,
-    avatar: channel.snippet.thumbnails.high.url,
+    avatar: channel.snippet.thumbnails.high?.url || channel.snippet.thumbnails.default?.url,
     uploadsPlaylistId: channel.contentDetails.relatedPlaylists.uploads,
     subscribers: channel.statistics.hiddenSubscriberCount
       ? null
@@ -261,28 +406,25 @@ async function getChannelFromUrl(url) {
 }
 
 async function fetchChannelStats(channelId) {
-  const apiUrl = `https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelId}&key=${process.env.YOUTUBE_API_KEY}`;
+  const channel = await fetchChannelById(channelId);
 
-  const res = await fetch(apiUrl);
-  const data = await res.json();
-
-  if (!data.items || data.items.length === 0) return null;
-
-  const stats = data.items[0].statistics;
+  if (!channel) return null;
 
   return {
-    views: Number(stats.viewCount),
-    subscribers: stats.hiddenSubscriberCount
+    views: Number(channel.statistics.viewCount),
+    subscribers: channel.statistics.hiddenSubscriberCount
       ? null
-      : Number(stats.subscriberCount),
+      : Number(channel.statistics.subscriberCount),
   };
 }
 
 async function getLatestVideo(uploadsPlaylistId) {
-  const apiUrl = `https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId=${uploadsPlaylistId}&maxResults=1&key=${process.env.YOUTUBE_API_KEY}`;
+  const apiUrl =
+    `https://www.googleapis.com/youtube/v3/playlistItems` +
+    `?part=snippet&playlistId=${encodeURIComponent(uploadsPlaylistId)}` +
+    `&maxResults=1&key=${process.env.YOUTUBE_API_KEY}`;
 
-  const res = await fetch(apiUrl);
-  const data = await res.json();
+  const data = await fetchYouTubeJson(apiUrl);
 
   if (!data.items || data.items.length === 0) return null;
 
@@ -311,7 +453,7 @@ async function updateStats() {
       await saveStats(channel.channel_id, stats);
       console.log(`Updated ${channel.name}`);
     } catch (error) {
-      console.log(`Failed to update ${channel.name}`);
+      console.log(`Failed to update ${channel.name}: ${error.message}`);
     }
   }
 }
@@ -367,7 +509,7 @@ async function checkUploads() {
         console.log(`New upload sent for ${monitor.youtube_name}`);
       }
     } catch (error) {
-      console.log(`Upload check failed for ${monitor.youtube_name}`);
+      console.log(`Upload check failed for ${monitor.youtube_name}: ${error.message}`);
     }
   }
 }
@@ -548,7 +690,7 @@ async function sendTestNotification(message) {
     return message.reply("✅ Test notification sent.");
   } catch (error) {
     console.error(error);
-    return message.reply("❌ Failed to send test notification.");
+    return message.reply(`❌ Failed to send test notification: ${error.message}`);
   }
 }
 
@@ -679,7 +821,7 @@ client.on("messageCreate", async (message) => {
       return message.reply(`✅ Added **${channel.name}** to the leaderboard tracker.`);
     } catch (error) {
       console.error(error);
-      return message.reply("Error adding channel.");
+      return message.reply(`Error adding channel: ${error.message}`);
     }
   }
 
@@ -700,7 +842,7 @@ client.on("messageCreate", async (message) => {
       );
     } catch (error) {
       console.error(error);
-      return message.reply("Could not remove that channel.");
+      return message.reply(`Could not remove that channel: ${error.message}`);
     }
   }
 
@@ -744,7 +886,7 @@ client.on("messageCreate", async (message) => {
 
       await saveMonitor({
         discordChannelId,
-        youtubeUrl,
+        youtubeUrl: youtubeChannel.url,
         youtubeChannelId: youtubeChannel.channelId,
         youtubeName: youtubeChannel.name,
         youtubeAvatar: youtubeChannel.avatar,
@@ -760,9 +902,7 @@ client.on("messageCreate", async (message) => {
       );
     } catch (error) {
       console.error(error);
-      return message.reply(
-        "Could not create monitor. Make sure Flux has **Manage Webhooks** permission in that channel."
-      );
+      return message.reply(`Could not create monitor: ${error.message}`);
     }
   }
 
@@ -781,7 +921,7 @@ client.on("messageCreate", async (message) => {
       return message.reply(`✅ Removed monitor for **${youtubeChannel.name}**.`);
     } catch (error) {
       console.error(error);
-      return message.reply("Could not remove monitor.");
+      return message.reply(`Could not remove monitor: ${error.message}`);
     }
   }
 });
